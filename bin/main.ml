@@ -1,7 +1,8 @@
 type stream = { mutable line_num: int; mutable chr: char list; chan: in_channel };;
 
 type lobject =
-        | Fixnum of int;;
+        | Fixnum of int
+        | Boolean of bool
 
 exception SyntaxError of string;;
 
@@ -43,15 +44,25 @@ let read_sexp stm =
         in
         eat_whitespace stm;
         let c = read_char stm in
-        if is_digit c
-        then read_fixnum (Char.escaped c)
+        if (is_digit c) || (c = '~')
+        then read_fixnum (Char.escaped (if c='~' then '-' else c))
+        else if c = '#' then
+                match (read_char stm) with 
+                | 't' -> Boolean(true)
+                | 'f' -> Boolean(false)
+                | x -> raise (SyntaxError ("Invalid boolean literal " ^ (Char.escaped x) ))
         else raise (SyntaxError ("Unexpected char " ^ (Char.escaped c)));;
+
+let print_sexp e =
+        match e with
+        | Fixnum(v) -> print_int v
+        | Boolean(b) -> print_string (if b then "#t" else "#f")
 
 let rec repl stm =
   print_string "> ";
   flush stdout;
-  let Fixnum(v) = read_sexp stm in
-  print_int v;
+  let sexp = read_sexp stm in
+  print_sexp sexp;
   print_newline ();
   repl stm;;
 
