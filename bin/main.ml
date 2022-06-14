@@ -14,6 +14,7 @@ type lobject =
 exception SyntaxError of string
 exception ThisCan'tHappenError
 exception NotFound of string
+exception TypeError of string
 
 let read_char stm =
   match stm.chr with
@@ -135,16 +136,35 @@ let rec lookup (n, e) =
 (* Params: Symbol, Value, Environment *)
 let bind (n, v, e) = Pair (Pair (Symbol n, v), e)
 
-let rec repl stm =
+let rec eval_sexp sexp env =
+  let eval_if cond if_true if_false =
+    let cond_val, _ = eval_sexp cond env in
+    match cond_val with
+    | Boolean true -> if_true
+    | Boolean false -> if_false
+    | _ -> raise (TypeError "(if bool e1 e2)")
+  in
+  match sexp with
+  | Fixnum v -> (Fixnum v, env)
+  | Boolean v -> (Boolean v, env)
+  | Symbol v -> (Symbol v, env)
+  | Nil -> (Nil, env)
+  | Pair (Symbol "if", Pair (cond, Pair (iftrue, Pair (iffalse, Nil)))) ->
+      eval_sexp (eval_if cond iftrue iffalse) env
+  (* Leave pairs as they are for now *)
+  | _ -> (sexp, env)
+
+let rec repl stm env =
   print_string "> ";
   flush stdout;
   let sexp = read_sexp stm in
-  print_sexp sexp;
+  let result, env' = eval_sexp sexp env in
+  print_sexp result;
   print_newline ();
-  repl stm
+  repl stm env'
 
 let main =
   let stm = { chr = []; line_num = 1; chan = stdin } in
-  repl stm
+  repl stm Nil
 
 let () = main
