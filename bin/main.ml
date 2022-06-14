@@ -13,6 +13,7 @@ type lobject =
 
 exception SyntaxError of string
 exception ThisCan'tHappenError
+exception NotFound of string
 
 let read_char stm =
   match stm.chr with
@@ -123,6 +124,16 @@ let rec print_sexp e =
       print_string "(";
       if is_list e then print_list e else print_pair e;
       print_string ")"
+
+(* Params: Symbol, Environment *)
+let rec lookup (n, e) =
+  match e with
+  | Nil -> raise (NotFound n)
+  | Pair (Pair (Symbol n', v), rst) -> if n = n' then v else lookup (n, rst)
+  | _ -> raise ThisCan'tHappenError
+
+(* Params: Symbol, Value, Environment *)
+let bind (n, v, e) = Pair (Pair (Symbol n, v), e)
 
 let rec repl stm =
   print_string "> ";
