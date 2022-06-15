@@ -4,6 +4,9 @@ type stream = {
   chan : in_channel;
 }
 
+(* Environment *)
+type 'a env = (string * 'a option ref) list
+
 type lobject =
   | Fixnum of int
   | Boolean of bool
@@ -13,6 +16,7 @@ type lobject =
   (* Functions *)
   | Primitive of string * (lobject list -> lobject)
   | Quote of value
+  | Closure of name list * exp * value env
 
 and value = lobject
 and name = string
@@ -26,14 +30,16 @@ and exp =
   | Apply of exp * exp
   | Call of exp * exp list
   | Defexp of def
+  | Lambda of name list * exp
 
-and def = Val of name * exp | Exp of exp
+and def = Val of name * exp | Exp of exp | Def of name * name list * exp
 
 exception SyntaxError of string
 exception ThisCan'tHappenError
 exception NotFound of string
 exception TypeError of string
 exception ParseError of string
+exception UnspecifiedValue of string
 
 let read_char stm =
   match stm.chr with
@@ -119,14 +125,27 @@ let rec is_list e =
   match e with Nil -> true | Pair (_, b) -> is_list b | _ -> false
 
 (* Params: Symbol, Environment *)
-let rec lookup (n, e) =
-  match e with
-  | Nil -> raise (NotFound n)
-  | Pair (Pair (Symbol n', v), rst) -> if n = n' then v else lookup (n, rst)
-  | _ -> raise ThisCan'tHappenError
+let rec lookup = function
+  | n, [] -> raise (NotFound n)
+  | n, (n', v) :: _ when n = n' -> (
+      match !v with Some v' -> v' | None -> raise (UnspecifiedValue n))
+  | n, (n', _) :: bs -> lookup (n, bs)
 
 (* Params: Symbol, Value, Environment *)
-let bind (n, v, e) = Pair (Pair (Symbol n, v), e)
+let bind (n, v, e) = (n, ref (Some v)) :: e
+let mkloc () = ref None
+
+let bindloc : name * 'a option ref * 'a env -> 'a env =
+ fun (n, vor, e) -> (n, vor) :: e
+
+let bind_list ns vs env =
+  List.fold_left2 (fun acc n v -> bind (n, v, acc)) env ns vs
+
+let rec env_to_val =
+  let b_to_val (n, vor) =
+    Pair (Symbol n, match !vor with None -> Symbol "unspecified" | Some v -> v)
+  in
+  function [] -> Nil | b :: bs -> Pair (b_to_val b, env_to_val bs)
 
 let rec pair_to_list pr =
   match pr with
@@ -148,13 +167,17 @@ let basis =
     | car :: cdr -> Pair (car, prim_list cdr)
   in
   let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
-  List.fold_left new_prim Nil
+  List.fold_left new_prim []
     [ ("+", prim_plus); ("list", prim_list); ("pair", prim_pair) ]
 
-let eval_exp exp env =
+let rec eval_exp exp env =
   let eval_apply f args =
     match f with
     | Primitive (_, f) -> f args
+    (* A closure is evaluated by first binding the arguments to the environment,
+       and then executing the relevant expression using this environment *)
+    | Closure (ns, exp, closure_env) ->
+        eval_exp exp (bind_list ns args closure_env)
     | _ -> raise (TypeError "(apply prim '(args)) or (prim args)")
   in
   let rec ev = function
@@ -175,9 +198,10 @@ let eval_exp exp env =
         | Boolean v1, Boolean v2 -> Boolean (v1 || v2)
         | _ -> raise (TypeError "(or bool bool)"))
     | Apply (fn, e) -> eval_apply (ev fn) (pair_to_list (ev e))
-    | Call (Var "env", []) -> env
+    | Call (Var "env", []) -> env_to_val env
     | Call (e, es) -> eval_apply (ev e) (List.map ev es)
     | Defexp _ -> raise ThisCan'tHappenError
+    | Lambda (ns, e) -> Closure (ns, e, env)
   in
   ev exp
 
@@ -187,13 +211,24 @@ let eval_def def env =
       let v = eval_exp e env in
       (v, bind (n, v, env))
   | Exp e -> (eval_exp e env, env)
+  | Def (n, ns, e) ->
+      let formals, body, closure_env =
+        match eval_exp (Lambda (ns, e)) env with
+        | Closure (fs, body', env) -> (fs, body', env)
+        | _ -> raise (TypeError "Expecting closure.")
+      in
+      let loc = mkloc () in
+      let clo = Closure (formals, body, bindloc (n, loc, closure_env)) in
+      (* So that the closure has a reference to itself *)
+      let () = loc := Some clo in
+      (clo, bindloc (n, loc, env))
 
 let eval ast env =
   match ast with Defexp d -> eval_def d env | e -> (eval_exp e env, env)
 
 let rec build_ast sexp =
   match sexp with
-  | Primitive _ -> raise ThisCan'tHappenError
+  | Primitive _ | Closure _ -> raise ThisCan'tHappenError
   | Fixnum _ | Boolean _ | Nil | Quote _ -> Literal sexp
   | Symbol s -> Var s
   | Pair _ when is_list sexp -> (
@@ -206,11 +241,27 @@ let rec build_ast sexp =
       | [ Symbol "apply"; fnexp; args ] ->
           Apply (build_ast fnexp, build_ast args)
       | [ Symbol "quote "; e ] -> Literal (Quote e)
+      | [ Symbol "lambda"; ns; e ] when is_list ns ->
+          let err () = raise (TypeError "(lambda (formals) body)") in
+          let names =
+            List.map (function Symbol s -> s | _ -> err ()) (pair_to_list ns)
+          in
+          Lambda (names, build_ast e)
+      | [ Symbol "define"; Symbol n; ns; e ] ->
+          let err () = raise (TypeError "(define name (formals) body)") in
+          let names =
+            List.map (function Symbol s -> s | _ -> err ()) (pair_to_list ns)
+          in
+          Defexp (Def (n, names, build_ast e))
       | fnexp :: args -> Call (build_ast fnexp, List.map build_ast args)
       | [] -> raise (ParseError "poorly formed expression"))
   | Pair _ -> Literal sexp
 
-let rec string_exp = function
+let spacesep ns = String.concat " " ns
+
+let rec string_exp =
+  let spacesep_exp exps = spacesep (List.map string_exp exps) in
+  function
   | Literal e -> string_val e
   | Var n -> n
   | If (c, t, f) ->
@@ -218,11 +269,12 @@ let rec string_exp = function
   | And (c1, c2) -> "(and " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
   | Or (c1, c2) -> "(or " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
   | Apply (f, e) -> "(apply " ^ string_exp f ^ " " ^ string_exp e ^ ")"
-  | Call (f, exps) ->
-      let string_exps = String.concat " " (List.map string_exp exps) in
-      "(" ^ string_exp f ^ " " ^ string_exps ^ ")"
+  | Call (f, exps) -> "(" ^ string_exp f ^ " " ^ spacesep_exp exps ^ ")"
   | Defexp (Val (n, e)) -> "(val " ^ n ^ " " ^ string_exp e ^ ")"
   | Defexp (Exp e) -> string_exp e
+  | Defexp (Def (n, ns, e)) ->
+      "(define " ^ n ^ "(" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
+  | Lambda _ -> "#<lambda>"
 
 and string_val e =
   let rec string_list l =
@@ -245,6 +297,7 @@ and string_val e =
       "(" ^ (if is_list e then string_list e else string_pair e) ^ ")"
   | Primitive (name, _) -> "#<primitive:" ^ name ^ ">"
   | Quote v -> "'" ^ string_val v
+  | Closure _ -> "#<closure>"
 
 let rec repl stm env =
   print_string "> ";
