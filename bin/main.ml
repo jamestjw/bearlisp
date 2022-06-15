@@ -12,6 +12,7 @@ type lobject =
   | Pair of lobject * lobject
   (* Functions *)
   | Primitive of string * (lobject list -> lobject)
+  | Quote of value
 
 and value = lobject
 and name = string
@@ -111,6 +112,7 @@ let rec read_sexp stm =
     | 't' -> Boolean true
     | 'f' -> Boolean false
     | x -> raise (SyntaxError ("Invalid boolean literal " ^ Char.escaped x))
+  else if c = '\'' then Quote (read_sexp stm)
   else raise (SyntaxError ("Unexpected char " ^ Char.escaped c))
 
 let rec is_list e =
@@ -156,6 +158,7 @@ let eval_exp exp env =
     | _ -> raise (TypeError "(apply prim '(args)) or (prim args)")
   in
   let rec ev = function
+    | Literal (Quote e) -> e
     | Literal l -> l
     | Var n -> lookup (n, env)
     | If (c, t, f) -> (
@@ -191,7 +194,7 @@ let eval ast env =
 let rec build_ast sexp =
   match sexp with
   | Primitive _ -> raise ThisCan'tHappenError
-  | Fixnum _ | Boolean _ | Nil -> Literal sexp
+  | Fixnum _ | Boolean _ | Nil | Quote _ -> Literal sexp
   | Symbol s -> Var s
   | Pair _ when is_list sexp -> (
       match pair_to_list sexp with
@@ -200,8 +203,9 @@ let rec build_ast sexp =
       | [ Symbol "and"; c1; c2 ] -> And (build_ast c1, build_ast c2)
       | [ Symbol "or"; c1; c2 ] -> Or (build_ast c1, build_ast c2)
       | [ Symbol "val"; Symbol n; e ] -> Defexp (Val (n, build_ast e))
-      | [ Symbol "apply"; fnexp; args ] when is_list args ->
+      | [ Symbol "apply"; fnexp; args ] ->
           Apply (build_ast fnexp, build_ast args)
+      | [ Symbol "quote "; e ] -> Literal (Quote e)
       | fnexp :: args -> Call (build_ast fnexp, List.map build_ast args)
       | [] -> raise (ParseError "poorly formed expression"))
   | Pair _ -> Literal sexp
@@ -240,6 +244,7 @@ and string_val e =
   | Pair (_, _) ->
       "(" ^ (if is_list e then string_list e else string_pair e) ^ ")"
   | Primitive (name, _) -> "#<primitive:" ^ name ^ ">"
+  | Quote v -> "'" ^ string_val v
 
 let rec repl stm env =
   print_string "> ";
