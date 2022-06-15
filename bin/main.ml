@@ -95,10 +95,10 @@ let rec read_sexp stm =
     | x -> raise (SyntaxError ("Invalid boolean literal " ^ Char.escaped x))
   else raise (SyntaxError ("Unexpected char " ^ Char.escaped c))
 
+let rec is_list e =
+  match e with Nil -> true | Pair (_, b) -> is_list b | _ -> false
+
 let rec print_sexp e =
-  let rec is_list e =
-    match e with Nil -> true | Pair (_, b) -> is_list b | _ -> false
-  in
   let rec print_list l =
     match l with
     | Pair (a, Nil) -> print_sexp a
@@ -112,7 +112,7 @@ let rec print_sexp e =
     match p with
     | Pair (a, b) ->
         print_sexp a;
-        print_string " ";
+        print_string " . ";
         print_sexp b
     | _ -> raise ThisCan'tHappenError
   in
@@ -136,6 +136,12 @@ let rec lookup (n, e) =
 (* Params: Symbol, Value, Environment *)
 let bind (n, v, e) = Pair (Pair (Symbol n, v), e)
 
+let rec pair_to_list pr =
+  match pr with
+  | Nil -> []
+  | Pair (a, b) -> a :: pair_to_list b
+  | _ -> raise ThisCan'tHappenError
+
 let rec eval_sexp sexp env =
   let eval_if cond if_true if_false =
     let cond_val, _ = eval_sexp cond env in
@@ -147,10 +153,19 @@ let rec eval_sexp sexp env =
   match sexp with
   | Fixnum v -> (Fixnum v, env)
   | Boolean v -> (Boolean v, env)
-  | Symbol v -> (Symbol v, env)
+  | Symbol name -> (lookup (name, env), env)
   | Nil -> (Nil, env)
-  | Pair (Symbol "if", Pair (cond, Pair (iftrue, Pair (iffalse, Nil)))) ->
-      eval_sexp (eval_if cond iftrue iffalse) env
+  | Pair (_, _) when is_list sexp -> (
+      match pair_to_list sexp with
+      | [ Symbol "if"; cond; if_true; if_false ] ->
+          eval_sexp (eval_if cond if_true if_false) env
+      | [ Symbol "env" ] -> (env, env)
+      | [ Symbol "pair"; car; cdr ] -> (Pair (car, cdr), env)
+      | [ Symbol "val"; Symbol name; exp ] ->
+          let exp_val, _ = eval_sexp exp env in
+          let env' = bind (name, exp_val, env) in
+          (exp_val, env')
+      | _ -> (sexp, env))
   (* Leave pairs as they are for now *)
   | _ -> (sexp, env)
 
