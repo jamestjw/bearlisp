@@ -2,3 +2,7 @@
  (public_name bearlisp)
  (name main)
  (libraries bearlisp))
+
+(env
+  (dev
+    (flags (:standard -warn-error -A))))

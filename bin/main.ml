@@ -13,10 +13,26 @@ type lobject =
   (* Functions *)
   | Primitive of string * (lobject list -> lobject)
 
+and value = lobject
+and name = string
+
+and exp =
+  | Literal of value
+  | Var of name
+  | If of exp * exp * exp
+  | And of exp * exp
+  | Or of exp * exp
+  | Apply of exp * exp
+  | Call of exp * exp list
+  | Defexp of def
+
+and def = Val of name * exp | Exp of exp
+
 exception SyntaxError of string
 exception ThisCan'tHappenError
 exception NotFound of string
 exception TypeError of string
+exception ParseError of string
 
 let read_char stm =
   match stm.chr with
@@ -100,35 +116,6 @@ let rec read_sexp stm =
 let rec is_list e =
   match e with Nil -> true | Pair (_, b) -> is_list b | _ -> false
 
-let rec print_sexp e =
-  let rec print_list l =
-    match l with
-    | Pair (a, Nil) -> print_sexp a
-    | Pair (a, b) ->
-        print_sexp a;
-        print_string " ";
-        print_list b
-    | _ -> raise ThisCan'tHappenError
-  in
-  let print_pair p =
-    match p with
-    | Pair (a, b) ->
-        print_sexp a;
-        print_string " . ";
-        print_sexp b
-    | _ -> raise ThisCan'tHappenError
-  in
-  match e with
-  | Fixnum v -> print_int v
-  | Boolean b -> print_string (if b then "#t" else "#f")
-  | Symbol s -> print_string s
-  | Nil -> print_string "nil"
-  | Pair (_, _) ->
-      print_string "(";
-      if is_list e then print_list e else print_pair e;
-      print_string ")"
-  | Primitive (name, _) -> print_string ("#<primitive:" ^ name ^ ">")
-
 (* Params: Symbol, Environment *)
 let rec lookup (n, e) =
   match e with
@@ -154,50 +141,112 @@ let basis =
     | [ a; b ] -> Pair (a, b)
     | _ -> raise (TypeError "(pair a b)")
   in
-  let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
-  List.fold_left new_prim Nil [ ("+", prim_plus); ("pair", prim_pair) ]
-
-let rec eval_sexp sexp env =
-  let eval_if cond if_true if_false =
-    let cond_val, _ = eval_sexp cond env in
-    match cond_val with
-    | Boolean true -> if_true
-    | Boolean false -> if_false
-    | _ -> raise (TypeError "(if bool e1 e2)")
+  let rec prim_list = function
+    | [] -> Nil
+    | car :: cdr -> Pair (car, prim_list cdr)
   in
+  let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
+  List.fold_left new_prim Nil
+    [ ("+", prim_plus); ("list", prim_list); ("pair", prim_pair) ]
+
+let eval_exp exp env =
+  let eval_apply f args =
+    match f with
+    | Primitive (_, f) -> f args
+    | _ -> raise (TypeError "(apply prim '(args)) or (prim args)")
+  in
+  let rec ev = function
+    | Literal l -> l
+    | Var n -> lookup (n, env)
+    | If (c, t, f) -> (
+        match ev c with
+        | Boolean true -> ev t
+        | Boolean false -> ev f
+        | _ -> raise (TypeError "(if bool e1 e2)"))
+    | And (c1, c2) -> (
+        match (ev c1, ev c2) with
+        | Boolean v1, Boolean v2 -> Boolean (v1 && v2)
+        | _ -> raise (TypeError "(and bool bool)"))
+    | Or (c1, c2) -> (
+        match (ev c1, ev c2) with
+        | Boolean v1, Boolean v2 -> Boolean (v1 || v2)
+        | _ -> raise (TypeError "(or bool bool)"))
+    | Apply (fn, e) -> eval_apply (ev fn) (pair_to_list (ev e))
+    | Call (Var "env", []) -> env
+    | Call (e, es) -> eval_apply (ev e) (List.map ev es)
+    | Defexp _ -> raise ThisCan'tHappenError
+  in
+  ev exp
+
+let eval_def def env =
+  match def with
+  | Val (n, e) ->
+      let v = eval_exp e env in
+      (v, bind (n, v, env))
+  | Exp e -> (eval_exp e env, env)
+
+let eval ast env =
+  match ast with Defexp d -> eval_def d env | e -> (eval_exp e env, env)
+
+let rec build_ast sexp =
   match sexp with
-  | Fixnum v -> (Fixnum v, env)
-  | Boolean v -> (Boolean v, env)
-  | Symbol name -> (lookup (name, env), env)
-  | Nil -> (Nil, env)
-  | Primitive (n, f) -> (Primitive (n, f), env)
-  | Pair (_, _) when is_list sexp -> (
+  | Primitive _ -> raise ThisCan'tHappenError
+  | Fixnum _ | Boolean _ | Nil -> Literal sexp
+  | Symbol s -> Var s
+  | Pair _ when is_list sexp -> (
       match pair_to_list sexp with
       | [ Symbol "if"; cond; if_true; if_false ] ->
-          (fst (eval_sexp (eval_if cond if_true if_false) env), env)
-      | [ Symbol "env" ] -> (env, env)
-      | [ Symbol "pair"; car; cdr ] -> (Pair (car, cdr), env)
-      | [ Symbol "val"; Symbol name; exp ] ->
-          let exp_val, _ = eval_sexp exp env in
-          let env' = bind (name, exp_val, env) in
-          (exp_val, env')
-      | Symbol fn :: args -> (
-          let eval_curr_env exp = fst (eval_sexp exp env) in
-          let evaluated_args = List.map eval_curr_env args in
-          match eval_sexp (Symbol fn) env with
-          | Primitive (n, f), _ -> (f evaluated_args, env)
-          | _ -> raise (TypeError "(apply func args)"))
-      | _ -> (sexp, env))
-  (* Leave pairs as they are for now *)
-  | _ -> (sexp, env)
+          If (build_ast cond, build_ast if_true, build_ast if_false)
+      | [ Symbol "and"; c1; c2 ] -> And (build_ast c1, build_ast c2)
+      | [ Symbol "or"; c1; c2 ] -> Or (build_ast c1, build_ast c2)
+      | [ Symbol "val"; Symbol n; e ] -> Defexp (Val (n, build_ast e))
+      | [ Symbol "apply"; fnexp; args ] when is_list args ->
+          Apply (build_ast fnexp, build_ast args)
+      | fnexp :: args -> Call (build_ast fnexp, List.map build_ast args)
+      | [] -> raise (ParseError "poorly formed expression"))
+  | Pair _ -> Literal sexp
+
+let rec string_exp = function
+  | Literal e -> string_val e
+  | Var n -> n
+  | If (c, t, f) ->
+      "(if " ^ string_exp c ^ " " ^ string_exp t ^ " " ^ string_exp f ^ ")"
+  | And (c1, c2) -> "(and " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
+  | Or (c1, c2) -> "(or " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
+  | Apply (f, e) -> "(apply " ^ string_exp f ^ " " ^ string_exp e ^ ")"
+  | Call (f, exps) ->
+      let string_exps = String.concat " " (List.map string_exp exps) in
+      "(" ^ string_exp f ^ " " ^ string_exps ^ ")"
+  | Defexp (Val (n, e)) -> "(val " ^ n ^ " " ^ string_exp e ^ ")"
+  | Defexp (Exp e) -> string_exp e
+
+and string_val e =
+  let rec string_list l =
+    match l with
+    | Pair (a, Nil) -> string_val a
+    | Pair (a, b) -> string_val a ^ " " ^ string_list b
+    | _ -> raise ThisCan'tHappenError
+  in
+  let string_pair p =
+    match p with
+    | Pair (a, b) -> string_val a ^ " . " ^ string_val b
+    | _ -> raise ThisCan'tHappenError
+  in
+  match e with
+  | Fixnum v -> string_of_int v
+  | Boolean b -> if b then "#t" else "#f"
+  | Symbol s -> s
+  | Nil -> "nil"
+  | Pair (_, _) ->
+      "(" ^ (if is_list e then string_list e else string_pair e) ^ ")"
+  | Primitive (name, _) -> "#<primitive:" ^ name ^ ">"
 
 let rec repl stm env =
   print_string "> ";
   flush stdout;
-  let sexp = read_sexp stm in
-  let result, env' = eval_sexp sexp env in
-  print_sexp result;
-  print_newline ();
+  let ast = build_ast (read_sexp stm) in
+  let result, env' = eval ast env in
+  let () = print_endline (string_val result) in
   repl stm env'
 
 let main =
