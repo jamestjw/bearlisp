@@ -10,6 +10,8 @@ type lobject =
   | Symbol of string
   | Nil
   | Pair of lobject * lobject
+  (* Functions *)
+  | Primitive of string * (lobject list -> lobject)
 
 exception SyntaxError of string
 exception ThisCan'tHappenError
@@ -125,6 +127,7 @@ let rec print_sexp e =
       print_string "(";
       if is_list e then print_list e else print_pair e;
       print_string ")"
+  | Primitive (name, _) -> print_string ("#<primitive:" ^ name ^ ">")
 
 (* Params: Symbol, Environment *)
 let rec lookup (n, e) =
@@ -142,6 +145,18 @@ let rec pair_to_list pr =
   | Pair (a, b) -> a :: pair_to_list b
   | _ -> raise ThisCan'tHappenError
 
+let basis =
+  let prim_plus = function
+    | [ Fixnum a; Fixnum b ] -> Fixnum (a + b)
+    | _ -> raise (TypeError "(+ int int)")
+  in
+  let prim_pair = function
+    | [ a; b ] -> Pair (a, b)
+    | _ -> raise (TypeError "(pair a b)")
+  in
+  let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
+  List.fold_left new_prim Nil [ ("+", prim_plus); ("pair", prim_pair) ]
+
 let rec eval_sexp sexp env =
   let eval_if cond if_true if_false =
     let cond_val, _ = eval_sexp cond env in
@@ -155,16 +170,23 @@ let rec eval_sexp sexp env =
   | Boolean v -> (Boolean v, env)
   | Symbol name -> (lookup (name, env), env)
   | Nil -> (Nil, env)
+  | Primitive (n, f) -> (Primitive (n, f), env)
   | Pair (_, _) when is_list sexp -> (
       match pair_to_list sexp with
       | [ Symbol "if"; cond; if_true; if_false ] ->
-          eval_sexp (eval_if cond if_true if_false) env
+          (fst (eval_sexp (eval_if cond if_true if_false) env), env)
       | [ Symbol "env" ] -> (env, env)
       | [ Symbol "pair"; car; cdr ] -> (Pair (car, cdr), env)
       | [ Symbol "val"; Symbol name; exp ] ->
           let exp_val, _ = eval_sexp exp env in
           let env' = bind (name, exp_val, env) in
           (exp_val, env')
+      | Symbol fn :: args -> (
+          let eval_curr_env exp = fst (eval_sexp exp env) in
+          let evaluated_args = List.map eval_curr_env args in
+          match eval_sexp (Symbol fn) env with
+          | Primitive (n, f), _ -> (f evaluated_args, env)
+          | _ -> raise (TypeError "(apply func args)"))
       | _ -> (sexp, env))
   (* Leave pairs as they are for now *)
   | _ -> (sexp, env)
@@ -180,6 +202,6 @@ let rec repl stm env =
 
 let main =
   let stm = { chr = []; line_num = 1; chan = stdin } in
-  repl stm Nil
+  repl stm basis
 
 let () = main
