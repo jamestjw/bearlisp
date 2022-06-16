@@ -179,6 +179,11 @@ let basis =
     | [ a; b ] -> Boolean (a = b)
     | _ -> raise (TypeError "(eq a b)")
   in
+  let prim_symp = function
+    | [ Symbol _ ] -> Boolean true
+    | [ _ ] -> Boolean false
+    | _ -> raise (TypeError "(sym? something)")
+  in
   let num_prim name op =
     ( name,
       function
@@ -200,6 +205,7 @@ let basis =
       ("cdr", prim_cdr);
       ("eq", prim_eq);
       ("atom?", prim_atomp);
+      ("sym?", prim_symp);
       num_prim "+" ( + );
       num_prim "-" ( - );
       num_prim "*" ( * );
