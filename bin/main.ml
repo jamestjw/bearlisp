@@ -167,68 +167,6 @@ let rec pair_to_list pr =
   | Pair (a, b) -> a :: pair_to_list b
   | _ -> raise ThisCan'tHappenError
 
-let basis =
-  let prim_pair = function
-    | [ a; b ] -> Pair (a, b)
-    | _ -> raise (TypeError "(pair a b)")
-  in
-  let rec prim_list = function
-    | [] -> Nil
-    | car :: cdr -> Pair (car, prim_list cdr)
-  in
-  let prim_car = function
-    | [ Pair (car, _) ] -> car
-    | _ -> raise (TypeError "(car non-nil-pair)")
-  in
-  let prim_cdr = function
-    | [ Pair (_, cdr) ] -> cdr
-    | _ -> raise (TypeError "(cdr non-nil-pair)")
-  in
-  let prim_atomp = function
-    | [ Pair (_, _) ] -> Boolean false
-    | [ _ ] -> Boolean true
-    | _ -> raise (TypeError "(atom? something)")
-  in
-  let prim_eq = function
-    | [ a; b ] -> Boolean (a = b)
-    | _ -> raise (TypeError "(eq a b)")
-  in
-  let prim_symp = function
-    | [ Symbol _ ] -> Boolean true
-    | [ _ ] -> Boolean false
-    | _ -> raise (TypeError "(sym? something)")
-  in
-  let num_prim name op =
-    ( name,
-      function
-      | [ Fixnum a; Fixnum b ] -> Fixnum (op a b)
-      | _ -> raise (TypeError ("(" ^ name ^ " int int)")) )
-  in
-  let cmp_prim name op =
-    ( name,
-      function
-      | [ Fixnum a; Fixnum b ] -> Boolean (op a b)
-      | _ -> raise (TypeError ("(" ^ name ^ " int int)")) )
-  in
-  let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
-  List.fold_left new_prim []
-    [
-      ("list", prim_list);
-      ("pair", prim_pair);
-      ("car", prim_car);
-      ("cdr", prim_cdr);
-      ("eq", prim_eq);
-      ("atom?", prim_atomp);
-      ("sym?", prim_symp);
-      num_prim "+" ( + );
-      num_prim "-" ( - );
-      num_prim "*" ( * );
-      num_prim "/" ( / );
-      cmp_prim "<" ( < );
-      cmp_prim ">" ( > );
-      cmp_prim "=" ( = );
-    ]
-
 let extend new_env old_env =
   List.fold_right (fun (b, v) acc -> bindloc (b, v, acc)) new_env old_env
 
@@ -406,16 +344,111 @@ and string_val e =
   | Quote v -> "'" ^ string_val v
   | Closure _ -> "#<closure>"
 
+let basis =
+  let prim_pair = function
+    | [ a; b ] -> Pair (a, b)
+    | _ -> raise (TypeError "(pair a b)")
+  in
+  let rec prim_list = function
+    | [] -> Nil
+    | car :: cdr -> Pair (car, prim_list cdr)
+  in
+  let prim_car = function
+    | [ Pair (car, _) ] -> car
+    | _ -> raise (TypeError "(car non-nil-pair)")
+  in
+  let prim_cdr = function
+    | [ Pair (_, cdr) ] -> cdr
+    | _ -> raise (TypeError "(cdr non-nil-pair)")
+  in
+  let prim_atomp = function
+    | [ Pair (_, _) ] -> Boolean false
+    | [ _ ] -> Boolean true
+    | _ -> raise (TypeError "(atom? something)")
+  in
+  let prim_eq = function
+    | [ a; b ] -> Boolean (a = b)
+    | _ -> raise (TypeError "(eq a b)")
+  in
+  let prim_symp = function
+    | [ Symbol _ ] -> Boolean true
+    | [ _ ] -> Boolean false
+    | _ -> raise (TypeError "(sym? something)")
+  in
+  let prim_getchar = function
+    | [] -> (
+        try Fixnum (int_of_char (input_char stdin))
+        with End_of_file -> Fixnum (-1))
+    | _ -> raise (TypeError "(getchar)")
+  in
+  let prim_print = function
+    | [ v ] ->
+        let () = print_string (string_val v) in
+        Symbol "ok"
+    | _ -> raise (TypeError "(print val)")
+  in
+  let prim_itoc = function
+    | [ Fixnum i ] -> Symbol (string_of_char @@ char_of_int i)
+    | _ -> raise (TypeError "(itoc int)")
+  in
+  let prim_cat = function
+    | [ Symbol a; Symbol b ] -> Symbol (a ^ b)
+    | _ -> raise (TypeError "(cat sym1 sym2)")
+  in
+  let num_prim name op =
+    ( name,
+      function
+      | [ Fixnum a; Fixnum b ] -> Fixnum (op a b)
+      | _ -> raise (TypeError ("(" ^ name ^ " int int)")) )
+  in
+  let cmp_prim name op =
+    ( name,
+      function
+      | [ Fixnum a; Fixnum b ] -> Boolean (op a b)
+      | _ -> raise (TypeError ("(" ^ name ^ " int int)")) )
+  in
+  let new_prim acc (name, func) = bind (name, Primitive (name, func), acc) in
+  List.fold_left new_prim
+    [ ("empty-symbol", ref (Some (Symbol ""))) ]
+    [
+      ("list", prim_list);
+      ("pair", prim_pair);
+      ("car", prim_car);
+      ("cdr", prim_cdr);
+      ("eq", prim_eq);
+      ("atom?", prim_atomp);
+      ("sym?", prim_symp);
+      ("getchar", prim_getchar);
+      ("print", prim_print);
+      ("itoc", prim_itoc);
+      ("cat", prim_cat);
+      num_prim "+" ( + );
+      num_prim "-" ( - );
+      num_prim "*" ( * );
+      num_prim "/" ( / );
+      cmp_prim "<" ( < );
+      cmp_prim ">" ( > );
+      cmp_prim "=" ( = );
+    ]
+
 let rec repl stm env =
-  print_string "> ";
-  flush stdout;
+  (* Print prompt if user is using the REPL via stdin *)
+  if stm.chan = stdin then (
+    print_string "> ";
+    flush stdout);
   let ast = build_ast (read_sexp stm) in
   let result, env' = eval ast env in
-  let () = print_endline (string_val result) in
+  (* Only print results if user is in REPL mode *)
+  if stm.chan = stdin then print_endline (string_val result);
   repl stm env'
 
+let get_input_channel () =
+  try open_in Sys.argv.(1) with Invalid_argument _ -> stdin
+
 let main =
-  let stm = { chr = []; line_num = 1; chan = stdin } in
-  repl stm basis
+  let input_channel = get_input_channel () in
+  let stm = { chr = []; line_num = 1; chan = input_channel } in
+  try repl stm basis
+  with End_of_file -> if input_channel <> stdin then close_in input_channel
 
 let () = main
