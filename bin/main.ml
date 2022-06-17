@@ -20,6 +20,7 @@ type lobject =
 
 and value = lobject
 and name = string
+and let_kind = LET | LETSTAR | LETREC
 
 and exp =
   | Literal of value
@@ -31,6 +32,7 @@ and exp =
   | Call of exp * exp list
   | Defexp of def
   | Lambda of name list * exp
+  | Let of let_kind * (name * exp) list * exp
 
 and def = Val of name * exp | Exp of exp | Def of name * name list * exp
 
@@ -40,6 +42,7 @@ exception NotFound of string
 exception TypeError of string
 exception ParseError of string
 exception UnspecifiedValue of string
+exception UniqueError of string
 
 let read_char stm =
   match stm.chr with
@@ -133,13 +136,16 @@ let rec lookup = function
 
 (* Params: Symbol, Value, Environment *)
 let bind (n, v, e) = (n, ref (Some v)) :: e
-let mkloc () = ref None
+let mkloc _ = ref None
 
 let bindloc : name * 'a option ref * 'a env -> 'a env =
  fun (n, vor, e) -> (n, vor) :: e
 
 let bind_list ns vs env =
   List.fold_left2 (fun acc n v -> bind (n, v, acc)) env ns vs
+
+let bindloc_list ns vs env =
+  List.fold_left2 (fun acc n v -> bindloc (n, v, acc)) env ns vs
 
 let rec env_to_val =
   let b_to_val (n, vor) =
@@ -225,9 +231,10 @@ let rec eval_exp exp env =
     (* A closure is evaluated by first binding the arguments to the environment,
        and then executing the relevant expression using this environment *)
     | Closure (ns, exp, closure_env) ->
-        eval_exp exp (extend (bind_list ns args closure_env) env)
+        eval_exp exp (bind_list ns args closure_env)
     | _ -> raise (TypeError "(apply prim '(args)) or (prim args)")
   in
+  let rec unzip ls = (List.map fst ls, List.map snd ls) in
   let rec ev = function
     | Literal (Quote e) -> e
     | Literal l -> l
@@ -248,9 +255,22 @@ let rec eval_exp exp env =
     | Apply (fn, e) -> eval_apply (ev fn) (pair_to_list (ev e))
     | Call (Var "env", []) -> env_to_val env
     | Call (e, es) -> eval_apply (ev e) (List.map ev es)
-    | Defexp _ -> raise ThisCan'tHappenError
     | Lambda (ns, e) -> Closure (ns, e, env)
+    | Let (LET, bindings, body) ->
+        let evbinding (n, e) = (n, ref (Some (ev e))) in
+        eval_exp body (extend (List.map evbinding bindings) env)
+    | Let (LETSTAR, bindings, body) ->
+        let evbinding acc (n, e) = bind (n, eval_exp e acc, acc) in
+        eval_exp body (extend (List.fold_left evbinding [] bindings) env)
+    | Let (LETREC, bs, body) ->
+        let names, values = unzip bs in
+        let env' = bindloc_list names (List.map mkloc values) env in
+        let updates = List.map (fun (n, e) -> (n, Some (eval_exp e env'))) bs in
+        let () = List.iter (fun (n, v) -> List.assoc n env' := v) updates in
+        eval_exp body env'
+    | Defexp _ -> raise ThisCan'tHappenError
   in
+
   ev exp
 
 let eval_def def env =
@@ -274,6 +294,10 @@ let eval_def def env =
 let eval ast env =
   match ast with Defexp d -> eval_def d env | e -> (eval_exp e env, env)
 
+let rec assert_unique = function
+  | [] -> ()
+  | x :: xs -> if List.mem x xs then raise (UniqueError x) else assert_unique xs
+
 let rec build_ast sexp =
   let rec cond_to_if = function
     (* TODO: For now, the interpreter returns an error in the
@@ -283,6 +307,9 @@ let rec build_ast sexp =
         If (build_ast cond, build_ast res, cond_to_if cond_pairs)
     | _ -> raise (TypeError "(cond conditions)")
   in
+  let let_kinds = [ ("let", LET); ("let*", LETSTAR); ("letrec", LETREC) ] in
+  let valid_let s = List.mem_assoc s let_kinds in
+  let to_kind s = List.assoc s let_kinds in
   match sexp with
   | Primitive _ | Closure _ -> raise ThisCan'tHappenError
   | Fixnum _ | Boolean _ | Nil | Quote _ -> Literal sexp
@@ -310,6 +337,14 @@ let rec build_ast sexp =
           in
           Defexp (Def (n, names, build_ast e))
       | Symbol "cond" :: conditions -> cond_to_if conditions
+      | [ Symbol s; bindings; exp ] when is_list bindings && valid_let s ->
+          let mkbinding = function
+            | Pair (Symbol n, Pair (e, Nil)) -> (n, build_ast e)
+            | _ -> raise (TypeError "(let bindings exp)")
+          in
+          let bindings = List.map mkbinding (pair_to_list bindings) in
+          let () = assert_unique (List.map fst bindings) in
+          Let (to_kind s, bindings, build_ast exp)
       | fnexp :: args -> Call (build_ast fnexp, List.map build_ast args)
       | [] -> raise (ParseError "poorly formed expression"))
   | Pair _ -> Literal sexp
@@ -318,6 +353,7 @@ let spacesep ns = String.concat " " ns
 
 let rec string_exp =
   let spacesep_exp exps = spacesep (List.map string_exp exps) in
+  let string_of_binding (n, e) = "(" ^ n ^ " " ^ string_exp e ^ ")" in
   function
   | Literal e -> string_val e
   | Var n -> n
@@ -331,7 +367,13 @@ let rec string_exp =
   | Defexp (Exp e) -> string_exp e
   | Defexp (Def (n, ns, e)) ->
       "(define " ^ n ^ "(" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
-  | Lambda _ -> "#<lambda>"
+  | Lambda (ns, e) -> "(lambda (" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
+  | Let (kind, bs, e) ->
+      let str =
+        match kind with LET -> "let" | LETSTAR -> "let*" | LETREC -> "letrec"
+      in
+      let bindings = spacesep (List.map string_of_binding bs) in
+      "(" ^ str ^ " (" ^ bindings ^ ") " ^ string_exp e ^ ")"
 
 and string_val e =
   let rec string_list l =
