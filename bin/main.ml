@@ -110,9 +110,17 @@ let rec read_sexp stm =
       let cdr = read_list stm in
       Pair (car, cdr)
   in
+  let rec eat_comment stm =
+    if read_char stm = '\n' then () else eat_comment stm
+  in
   eat_whitespace stm;
   let c = read_char stm in
-  if start_char_is_sym c then Symbol (string_of_char c ^ read_symbol ())
+  (* When we encounter a comment, consume characters until
+     we encounter a newline *)
+  if c = ';' then (
+    eat_comment stm;
+    read_sexp stm)
+  else if start_char_is_sym c then Symbol (string_of_char c ^ read_symbol ())
   else if is_digit c || c = '~' then
     read_fixnum (string_of_char (if c = '~' then '-' else c))
   else if c = '(' then read_list stm
