@@ -1,7 +1,8 @@
-type stream = {
+type 'a stream = {
   mutable line_num : int;
   mutable chr : char list;
-  chan : in_channel;
+  stdin : bool;
+  stm : 'a Stream.t;
 }
 
 (* Environment *)
@@ -44,10 +45,14 @@ exception ParseError of string
 exception UnspecifiedValue of string
 exception UniqueError of string
 
+let mkstream is_stdin stm = { chr = []; line_num = 1; stdin = is_stdin; stm }
+let mkstringstream s = mkstream false @@ Stream.of_string s
+let mkfilestream f = mkstream (f = stdin) @@ Stream.of_channel f
+
 let read_char stm =
   match stm.chr with
   | [] ->
-      let c = input_char stm.chan in
+      let c = Stream.next stm.stm in
       if c = '\n' then
         let _ = stm.line_num <- stm.line_num + 1 in
         c
@@ -135,6 +140,55 @@ let rec read_sexp stm =
 let rec is_list e =
   match e with Nil -> true | Pair (_, b) -> is_list b | _ -> false
 
+let spacesep ns = String.concat " " ns
+
+let rec string_exp =
+  let spacesep_exp exps = spacesep (List.map string_exp exps) in
+  let string_of_binding (n, e) = "(" ^ n ^ " " ^ string_exp e ^ ")" in
+  function
+  | Literal e -> string_val e
+  | Var n -> n
+  | If (c, t, f) ->
+      "(if " ^ string_exp c ^ " " ^ string_exp t ^ " " ^ string_exp f ^ ")"
+  | And (c1, c2) -> "(and " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
+  | Or (c1, c2) -> "(or " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
+  | Apply (f, e) -> "(apply " ^ string_exp f ^ " " ^ string_exp e ^ ")"
+  | Call (f, exps) -> "(" ^ string_exp f ^ " " ^ spacesep_exp exps ^ ")"
+  | Defexp (Val (n, e)) -> "(val " ^ n ^ " " ^ string_exp e ^ ")"
+  | Defexp (Exp e) -> string_exp e
+  | Defexp (Def (n, ns, e)) ->
+      "(define " ^ n ^ "(" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
+  | Lambda (ns, e) -> "(lambda (" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
+  | Let (kind, bs, e) ->
+      let str =
+        match kind with LET -> "let" | LETSTAR -> "let*" | LETREC -> "letrec"
+      in
+      let bindings = spacesep (List.map string_of_binding bs) in
+      "(" ^ str ^ " (" ^ bindings ^ ") " ^ string_exp e ^ ")"
+
+and string_val e =
+  let rec string_list l =
+    match l with
+    | Pair (a, Nil) -> string_val a
+    | Pair (a, b) -> string_val a ^ " " ^ string_list b
+    | _ -> raise ThisCan'tHappenError
+  in
+  let string_pair p =
+    match p with
+    | Pair (a, b) -> string_val a ^ " . " ^ string_val b
+    | _ -> raise ThisCan'tHappenError
+  in
+  match e with
+  | Fixnum v -> string_of_int v
+  | Boolean b -> if b then "#t" else "#f"
+  | Symbol s -> s
+  | Nil -> "nil"
+  | Pair (_, _) ->
+      "(" ^ (if is_list e then string_list e else string_pair e) ^ ")"
+  | Primitive (name, _) -> "#<primitive:" ^ name ^ ">"
+  | Quote v -> "'" ^ string_val v
+  | Closure _ -> "#<closure>"
+
 (* Params: Symbol, Environment *)
 let rec lookup = function
   | n, [] -> raise (NotFound n)
@@ -207,7 +261,7 @@ let rec eval_exp exp env =
         eval_exp body (extend (List.map evbinding bindings) env)
     | Let (LETSTAR, bindings, body) ->
         let evbinding acc (n, e) = bind (n, eval_exp e acc, acc) in
-        eval_exp body (extend (List.fold_left evbinding [] bindings) env)
+        eval_exp body (List.fold_left evbinding env bindings)
     | Let (LETREC, bs, body) ->
         let names, values = unzip bs in
         let env' = bindloc_list names (List.map mkloc values) env in
@@ -217,7 +271,11 @@ let rec eval_exp exp env =
     | Defexp _ -> raise ThisCan'tHappenError
   in
 
-  ev exp
+  try ev exp
+  with e ->
+    let err = Printexc.to_string e in
+    print_endline @@ "Error: '" ^ err ^ "' in expression " ^ string_exp exp;
+    raise e
 
 let eval_def def env =
   match def with
@@ -295,54 +353,19 @@ let rec build_ast sexp =
       | [] -> raise (ParseError "poorly formed expression"))
   | Pair _ -> Literal sexp
 
-let spacesep ns = String.concat " " ns
+let rec repl stm env =
+  (* Print prompt if user is using the REPL via stdin *)
+  if stm.stdin then (
+    print_string "> ";
+    flush stdout);
+  let ast = build_ast (read_sexp stm) in
+  let result, env' = eval ast env in
+  (* Only print results if user is in REPL mode *)
+  if stm.stdin then print_endline (string_val result);
+  repl stm env'
 
-let rec string_exp =
-  let spacesep_exp exps = spacesep (List.map string_exp exps) in
-  let string_of_binding (n, e) = "(" ^ n ^ " " ^ string_exp e ^ ")" in
-  function
-  | Literal e -> string_val e
-  | Var n -> n
-  | If (c, t, f) ->
-      "(if " ^ string_exp c ^ " " ^ string_exp t ^ " " ^ string_exp f ^ ")"
-  | And (c1, c2) -> "(and " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
-  | Or (c1, c2) -> "(or " ^ string_exp c1 ^ " " ^ string_exp c2 ^ ")"
-  | Apply (f, e) -> "(apply " ^ string_exp f ^ " " ^ string_exp e ^ ")"
-  | Call (f, exps) -> "(" ^ string_exp f ^ " " ^ spacesep_exp exps ^ ")"
-  | Defexp (Val (n, e)) -> "(val " ^ n ^ " " ^ string_exp e ^ ")"
-  | Defexp (Exp e) -> string_exp e
-  | Defexp (Def (n, ns, e)) ->
-      "(define " ^ n ^ "(" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
-  | Lambda (ns, e) -> "(lambda (" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
-  | Let (kind, bs, e) ->
-      let str =
-        match kind with LET -> "let" | LETSTAR -> "let*" | LETREC -> "letrec"
-      in
-      let bindings = spacesep (List.map string_of_binding bs) in
-      "(" ^ str ^ " (" ^ bindings ^ ") " ^ string_exp e ^ ")"
-
-and string_val e =
-  let rec string_list l =
-    match l with
-    | Pair (a, Nil) -> string_val a
-    | Pair (a, b) -> string_val a ^ " " ^ string_list b
-    | _ -> raise ThisCan'tHappenError
-  in
-  let string_pair p =
-    match p with
-    | Pair (a, b) -> string_val a ^ " . " ^ string_val b
-    | _ -> raise ThisCan'tHappenError
-  in
-  match e with
-  | Fixnum v -> string_of_int v
-  | Boolean b -> if b then "#t" else "#f"
-  | Symbol s -> s
-  | Nil -> "nil"
-  | Pair (_, _) ->
-      "(" ^ (if is_list e then string_list e else string_pair e) ^ ")"
-  | Primitive (name, _) -> "#<primitive:" ^ name ^ ">"
-  | Quote v -> "'" ^ string_val v
-  | Closure _ -> "#<closure>"
+let get_input_channel () =
+  try open_in Sys.argv.(1) with Invalid_argument _ -> stdin
 
 let basis =
   let prim_pair = function
@@ -431,24 +454,79 @@ let basis =
       cmp_prim "=" ( = );
     ]
 
-let rec repl stm env =
-  (* Print prompt if user is using the REPL via stdin *)
-  if stm.chan = stdin then (
-    print_string "> ";
-    flush stdout);
-  let ast = build_ast (read_sexp stm) in
-  let result, env' = eval ast env in
-  (* Only print results if user is in REPL mode *)
-  if stm.chan = stdin then print_endline (string_val result);
-  repl stm env'
-
-let get_input_channel () =
-  try open_in Sys.argv.(1) with Invalid_argument _ -> stdin
+let stdlib =
+  let ev env e =
+    match e with
+    | Defexp d -> eval_def d env
+    | _ -> raise (TypeError "Can only have definitions in stdlib")
+  in
+  let rec slurp stm env =
+    try stm |> read_sexp |> build_ast |> ev env |> snd |> slurp stm
+    with Stream.Failure -> env
+  in
+  let stm =
+    mkstringstream
+      "\n\
+      \  (define o (f g) (lambda (x) (f (g x))))\n\
+       (val caar (o car car))\n\
+       (val cadr (o car cdr))\n\
+       (val caddr (o cadr cdr))\n\
+       (val cadar (o car (o cdr car)))\n\
+       (val caddar (o car (o cdr (o cdr car))))\n\n\
+       (val cons pair)\n\n\
+       (val newline (itoc 10))\n\
+       (val space (itoc 32))\n\n\
+       ; This is pretty awkward looking because we have no other way to sequence\n\
+       ; operations. We have no begin, nothing.\n\
+       (define println (s)\n\
+      \  (let ((ok (print s)))\n\
+      \    (print newline)))\n\n\
+       ; This is less awkward because we actually use ic and c.\n\
+       (define getline ()\n\
+      \  (let* ((ic (getchar))\n\
+      \         (c (itoc ic)))\n\
+      \    (if (or (eq c newline) (eq ic ~1))\n\
+      \      empty-symbol\n\
+      \      (cat c (getline)))))\n\n\
+       (define null? (xs)\n\
+      \  (eq xs '()))\n\n\
+       (define length (ls)\n\
+      \  (if (null? ls)\n\
+      \    0\n\
+      \    (+ 1 (length (cdr ls)))))\n\n\
+       (define take (n ls)\n\
+      \  (if (or (< n 1) (null? ls))\n\
+      \    '()\n\
+      \    (cons (car ls) (take (- n 1) (cdr ls)))))\n\n\
+       (define drop (n ls)\n\
+      \  (if (or (< n 1) (null? ls))\n\
+      \    ls\n\
+      \    (drop (- n 1) (cdr ls))))\n\n\
+       (define merge (xs ys)\n\
+      \  (if (null? xs)\n\
+      \    ys\n\
+      \    (if (null? ys)\n\
+      \      xs\n\
+      \      (if (< (car xs) (car ys))\n\
+      \        (cons (car xs) (merge (cdr xs) ys))\n\
+      \        (cons (car ys) (merge xs (cdr ys)))))))\n\n\
+       (define mergesort (ls)\n\
+      \  (if (null? ls)\n\
+      \    ls\n\
+      \    (if (null? (cdr ls))\n\
+      \      ls\n\
+      \      (let* ((size (length ls))\n\
+      \             (half (/ size 2))\n\
+      \             (first (take half ls))\n\
+      \             (second (drop half ls)))\n\
+      \        (merge (mergesort first) (mergesort second))))))\n\
+      \  "
+  in
+  slurp stm basis
 
 let main =
   let input_channel = get_input_channel () in
-  let stm = { chr = []; line_num = 1; chan = input_channel } in
-  try repl stm basis
-  with End_of_file -> if input_channel <> stdin then close_in input_channel
+  try repl (mkfilestream input_channel) stdlib
+  with Stream.Failure -> if input_channel <> stdin then close_in input_channel
 
 let () = main
