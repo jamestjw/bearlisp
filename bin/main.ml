@@ -76,7 +76,7 @@ module Ast = struct
     | Lambda of name list * exp
     | Let of let_kind * (name * exp) list * exp
 
-  and def = Val of name * exp | Exp of exp | Def of name * name list * exp
+  and def = Val of name * exp | Exp of exp
 
   let rec string_exp =
     let spacesep ns = String.concat " " ns in
@@ -93,8 +93,6 @@ module Ast = struct
     | Call (f, exps) -> "(" ^ string_exp f ^ " " ^ spacesep_exp exps ^ ")"
     | Defexp (Val (n, e)) -> "(val " ^ n ^ " " ^ string_exp e ^ ")"
     | Defexp (Exp e) -> string_exp e
-    | Defexp (Def (n, ns, e)) ->
-        "(define " ^ n ^ "(" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
     | Lambda (ns, e) -> "(lambda (" ^ spacesep ns ^ ") " ^ string_exp e ^ ")"
     | Let (kind, bs, e) ->
         let str =
@@ -300,7 +298,10 @@ module Reader : READER = struct
                 (function Symbol s -> s | _ -> err ())
                 (pair_to_list ns)
             in
-            Defexp (Def (n, names, build e))
+            let () = assert_unique names in
+            let l = Lambda (names, build e) in
+            (* We convert a `define` to an equivalent `letrec` *)
+            Defexp (Val (n, Let (LETREC, [ (n, l) ], Var n)))
         | Symbol "cond" :: conditions -> cond_to_if conditions
         | [ Symbol s; bindings; exp ] when is_list bindings && valid_let s ->
             let mkbinding = function
@@ -337,7 +338,7 @@ module Evaluator : EVALUATOR = struct
           eval_exp exp (Env.bind_list ns args closure_env)
       | _ -> raise (TypeError "(apply prim '(args)) or (prim args)")
     in
-    let rec unzip ls = (List.map fst ls, List.map snd ls) in
+    let unzip ls = (List.map fst ls, List.map snd ls) in
     let rec ev = function
       | Literal (Quote e) -> e
       | Literal l -> l
@@ -388,17 +389,6 @@ module Evaluator : EVALUATOR = struct
         let v = eval_exp e env in
         (v, Env.bind (n, v, env))
     | Exp e -> (eval_exp e env, env)
-    | Def (n, ns, e) ->
-        let formals, body, closure_env =
-          match eval_exp (Lambda (ns, e)) env with
-          | Closure (fs, body', env) -> (fs, body', env)
-          | _ -> raise (TypeError "Expecting closure.")
-        in
-        let loc = Env.mkloc () in
-        let clo = Closure (formals, body, Env.bindloc (n, loc, closure_env)) in
-        (* So that the closure has a reference to itself *)
-        let () = loc := Some clo in
-        (clo, Env.bindloc (n, loc, env))
 
   let eval ast env =
     match ast with Defexp d -> eval_def d env | e -> (eval_exp e env, env)
